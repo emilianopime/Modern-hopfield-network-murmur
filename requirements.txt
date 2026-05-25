@@ -1,0 +1,35 @@
+# ===================================================================
+# INSTALACIÓN (CachyOS — protocolo CUDA bundled, sin toolkit del sistema)
+#
+# 1) PyTorch con CUDA 12.8 bundled (driver ≥ 520 requerido, RTX 3060 OK):
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+#
+# 2) hopfield-layers no tiene wheel para Python 3.14 → instalar desde fuente:
+#    pip install git+https://github.com/ml-jku/hopfield-layers.git
+#    O clonar y hacer: pip install /ruta/al/repo
+#
+# 3) Resto de dependencias:
+#    pip install -r requirements.txt
+# ===================================================================
+
+# Capa MHN — instalar desde git (ver instrucciones arriba)
+# hopfield-layers  ← descomentar solo si PyPI lo soporta en tu versión de Python
+
+# Audio y DSP (Fase 1)
+librosa
+PyWavelets          # wavelet denoising: pywt.wavedec / waverec
+scipy               # Savitzky-Golay: scipy.signal.savgol_filter
+
+# Dataset PhysioNet
+wfdb                # lectura de registros WFDB (.hea / .wav)
+aiohttp             # descarga paralela (download_dataset.py)
+
+# Utilidades generales
+numpy
+pandas
+scikit-learn
+tqdm
+
+# Visualización e interpretabilidad
+matplotlib
+seaborn
