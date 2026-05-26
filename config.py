@@ -15,28 +15,26 @@ import torch
 # ─────────────────────────────────────────────
 @dataclass
 class PreprocessConfig:
-    # Características del dataset CirCor DigiScope
-    sample_rate: int = 4000            # Hz — frecuencia de muestreo nativa del dataset
+    sample_rate: int = 4000
 
-    # (1-a) Transformada Wavelet — denoising de ruido clínico
-    wavelet: str = "db6"               # Daubechies 6: suave, ideal para señales biomédicas
-    wavelet_level: int = 5             # Niveles de descomposición
-    threshold_mode: str = "soft"       # 'soft' preserva morfología del ciclo cardíaco
+    # (1-a) Transformada Wavelet — denoising
+    wavelet: str = "db6"
+    wavelet_level: int = 5
+    threshold_mode: str = "soft"
 
-    # (1-b) Filtro Savitzky-Golay — suavizado polinomial post-wavelet
-    sg_window_length: int = 51         # ~12.75 ms a 4000 Hz; mantiene transiciones cardíacas
-    sg_polyorder: int = 3              # Polinomio cúbico: equilibra suavizado y fidelidad
+    # (1-b) Filtro Savitzky-Golay
+    sg_window_length: int = 51
+    sg_polyorder: int = 3
 
     # (1-c) Mel Spectrogram
-    n_fft: int = 1024                  # Ventana FFT (~256 ms a 4000 Hz)
-    hop_length: int = 256              # Salto de ventana (~64 ms → ~62 frames/seg)
-    n_mels: int = 128                  # Bandas de Mel
-    f_min: float = 20.0                # Hz — inicio del rango de interés PCG
-    f_max: float = 1000.0              # Hz — límite superior (soplos: 100-600 Hz)
-    power: float = 2.0                 # Potencia del espectrograma (2.0 = potencia de energía)
-    top_db: float = 80.0               # Rango dinámico en dB para normalización logarítmica
+    n_fft: int = 1024
+    hop_length: int = 256
+    n_mels: int = 128
+    f_min: float = 20.0
+    f_max: float = 1000.0
+    power: float = 2.0
+    top_db: float = 80.0
 
-    # Caching de espectrogramas preprocesados en disco
     cache_dir: Path = Path("data/cache")
     cache_enabled: bool = True
 
@@ -46,10 +44,12 @@ class PreprocessConfig:
 # ─────────────────────────────────────────────
 @dataclass
 class CNNConfig:
-    backbone: str = "resnet18"         # "resnet18" | "efficientnet_b0"
-    pretrained: bool = True            # ImageNet pretraining (canal 1→adaptado)
-    embedding_dim: int = 512           # Dimensión de embeddings de salida por frame temporal
-    freeze_backbone_epochs: int = 5    # Epochs iniciales con backbone congelado (fine-tuning gradual)
+    backbone: str = "resnet18"
+    pretrained: bool = True
+    embedding_dim: int = 512
+    # v3: extendido 5→12 para que HopfieldPooling consolide patrones
+    # antes de que el CNN empiece a moverse (evita desestabilización época 6)
+    freeze_backbone_epochs: int = 12
 
 
 # ─────────────────────────────────────────────
@@ -57,19 +57,15 @@ class CNNConfig:
 # ─────────────────────────────────────────────
 @dataclass
 class HopfieldConfig:
-    hidden_size: int = 512             # Dimensión del espacio de asociación
-    output_size: int = 512             # Dimensión de salida por patrón almacenado
-    num_heads: int = 8                 # Cabezas de atención multi-patrón
-    quantity: int = 4                  # Prototipos almacenados en memoria asociativa
+    hidden_size: int = 512
+    output_size: int = 512
+    num_heads: int = 8
+    quantity: int = 4
     dropout: float = 0.1
-
-    # β = 1/√d (inicialización recomendada por el reporte técnico)
-    # None → se calcula automáticamente en el modelo desde embedding_dim
     beta: float = None
 
     @property
     def beta_value(self) -> float:
-        """β efectivo: si no se especifica, usa 1/√embedding_dim."""
         if self.beta is not None:
             return self.beta
         return 1.0 / math.sqrt(512)
@@ -80,25 +76,19 @@ class HopfieldConfig:
 # ─────────────────────────────────────────────
 @dataclass
 class ClassifierConfig:
-    num_classes: int = 3               # Present | Absent | Unknown
+    num_classes: int = 3
     class_names: list = field(default_factory=lambda: ["Present", "Absent", "Unknown"])
-    dropout: float = 0.3
-    # NOTA: Los pesos de clase ya NO se definen aquí manualmente.
-    # CBFocalLoss los calcula automáticamente desde los conteos reales del dataset.
+    # v3: 0.3→0.45 para frenar memorización (loss train bajó a 0.01 en v2)
+    dropout: float = 0.45
 
 
 # ─────────────────────────────────────────────
 # Features tabulares clínicos
-# Inspirado en FeatureEngineer del script PF5367600.py (amigo):
-# BMI, age_group (ordinal), recording_count, height, weight, sex, pregnancy.
-# Se fusionan con el output de HopfieldPooling antes del clasificador.
 # ─────────────────────────────────────────────
 @dataclass
 class TabularConfig:
     enabled: bool = True
-    # 7 features: age_group, sex, height, weight, bmi, recording_count, pregnancy
     n_features: int = 7
-    # Dimensión del embedding tabular (fusionado con output Hopfield)
     embed_dim: int = 64
     dropout: float = 0.2
 
@@ -112,9 +102,15 @@ class DataConfig:
     auscultation_positions: list = field(
         default_factory=lambda: ["AV", "PV", "TV", "MV"]
     )
-    # Partición training/validation (split interno sobre training_data.csv)
     val_split: float = 0.15
     random_seed: int = 42
+
+    # v3: WeightedRandomSampler — oversampling de Unknown×10 y Present×5
+    # Ataca el colapso de Unknown directamente (132 muestras vs 2026 Absent)
+    use_weighted_sampler: bool = True
+    sampler_weights: list = field(
+        default_factory=lambda: [5.0, 1.0, 10.0]  # [Present, Absent, Unknown]
+    )
 
 
 # ─────────────────────────────────────────────
@@ -122,31 +118,43 @@ class DataConfig:
 # ─────────────────────────────────────────────
 @dataclass
 class TrainingConfig:
-    # Recursos de hardware (RTX 3060 + Ryzen 7 5700x)
-    batch_size: int = 32               # 32-64 según VRAM disponible (MHN usa matrices de correlación)
-    num_workers: int = 6               # Ryzen 7 5700x (8 núcleos / 16 hilos)
+    batch_size: int = 32
+    num_workers: int = 6
     pin_memory: bool = True
 
-    epochs: int = 120                  # Aumentado de 60 → 120 para mejor convergencia
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-4
-    grad_clip: float = 1.0             # Clip de gradientes para estabilidad con MHN
+    epochs: int = 120
+    # v3: 1e-4→5e-5 — convergencia más lenta desplaza el pico a épocas más tardías
+    learning_rate: float = 5e-5
+    # v3: 1e-4→5e-4 — más regularización L2 para frenar overfitting en Fase 2
+    weight_decay: float = 5e-4
+    grad_clip: float = 1.0
 
-    # Cosine LR con warmup (reemplaza ReduceLROnPlateau)
-    # Inspirado en MZA-PCG v5: evita colapso prematuro del LR en época 12.
-    warmup_epochs: int = 5             # LR crece linealmente de 0 → LR base
-    lr_min_factor: float = 0.01       # LR final = learning_rate * lr_min_factor
+    # Warmup inicial (épocas 1..warmup_epochs): LR 0 → learning_rate
+    warmup_epochs: int = 5
+    lr_min_factor: float = 0.01
 
-    # CB-Focal Loss (Cui et al. 2019 + Lin et al. 2017)
-    focal_gamma: float = 2.0           # γ: exponent de penalización focal
-    focal_beta: float = 0.9999         # β: smoothing de volumen efectivo
+    # v3: SGDR — Cosine Annealing con Warm Restarts (reemplaza cosine simple)
+    # T_0=20: reinicia el LR cada 20 épocas después del warmup.
+    # Con warmup=5 y T_0=20, los reinicios ocurren en épocas ~26, 46, 66, 86, 106.
+    # Cada reinicio es una nueva oportunidad de explorar — desplaza el mejor
+    # checkpoint a épocas 40-80 en lugar de 33.
+    sgdr_T0: int = 20
 
-    # ClinicalMixUp — regularización en entrenamiento
-    # Mezcla espectrogramas + features tabulares de dos muestras del batch.
-    # Solo mezcla en un 50% de los batches para no degradar señales sutiles.
-    mixup_alpha: float = 0.3           # α para distribución Beta(α,α); 0.0 = desactivado
+    # v3: CB-Focal Loss con label smoothing ε=0.1
+    # Reduce sobreconfianza en Absent (la clase fácil) → mejor generalización
+    focal_gamma: float = 2.0
+    focal_beta: float = 0.9999
+    label_smoothing: float = 0.1
 
-    # Checkpointing
+    # ClinicalMixUp
+    mixup_alpha: float = 0.3
+
+    # v3: SpecAugment — enmascara franjas de frecuencia y tiempo en espectrogramas
+    # Impide que el modelo memorice patrones específicos del training set
+    spec_augment_prob: float = 0.5    # probabilidad de aplicar por batch
+    spec_freq_mask_p: float = 0.15   # fracción de bandas mel a enmascarar
+    spec_time_mask_p: float = 0.15   # fracción de frames temporales a enmascarar
+
     checkpoint_dir: Path = Path("checkpoints")
     save_every_n_epochs: int = 5
 
@@ -156,7 +164,7 @@ class TrainingConfig:
 
 
 # ─────────────────────────────────────────────
-# Configuración global (punto de entrada único)
+# Configuración global
 # ─────────────────────────────────────────────
 @dataclass
 class Config:
@@ -169,5 +177,4 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
 
 
-# Instancia por defecto — importar directamente en otros módulos
 cfg = Config()
