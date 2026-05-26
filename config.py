@@ -72,7 +72,6 @@ class HopfieldConfig:
         """β efectivo: si no se especifica, usa 1/√embedding_dim."""
         if self.beta is not None:
             return self.beta
-        # Se delega al modelo; aquí se expone la fórmula de referencia
         return 1.0 / math.sqrt(512)
 
 
@@ -84,9 +83,24 @@ class ClassifierConfig:
     num_classes: int = 3               # Present | Absent | Unknown
     class_names: list = field(default_factory=lambda: ["Present", "Absent", "Unknown"])
     dropout: float = 0.3
-    # Pesos de clase para CrossEntropyLoss (compensar desbalance del dataset)
-    # Orden: [Present, Absent, Unknown]
-    class_weights: list = field(default_factory=lambda: [5.0, 1.0, 7.0])
+    # NOTA: Los pesos de clase ya NO se definen aquí manualmente.
+    # CBFocalLoss los calcula automáticamente desde los conteos reales del dataset.
+
+
+# ─────────────────────────────────────────────
+# Features tabulares clínicos
+# Inspirado en FeatureEngineer del script PF5367600.py (amigo):
+# BMI, age_group (ordinal), recording_count, height, weight, sex, pregnancy.
+# Se fusionan con el output de HopfieldPooling antes del clasificador.
+# ─────────────────────────────────────────────
+@dataclass
+class TabularConfig:
+    enabled: bool = True
+    # 7 features: age_group, sex, height, weight, bmi, recording_count, pregnancy
+    n_features: int = 7
+    # Dimensión del embedding tabular (fusionado con output Hopfield)
+    embed_dim: int = 64
+    dropout: float = 0.2
 
 
 # ─────────────────────────────────────────────
@@ -98,7 +112,7 @@ class DataConfig:
     auscultation_positions: list = field(
         default_factory=lambda: ["AV", "PV", "TV", "MV"]
     )
-    # Partición training/validation
+    # Partición training/validation (split interno sobre training_data.csv)
     val_split: float = 0.15
     random_seed: int = 42
 
@@ -113,14 +127,24 @@ class TrainingConfig:
     num_workers: int = 6               # Ryzen 7 5700x (8 núcleos / 16 hilos)
     pin_memory: bool = True
 
-    epochs: int = 60
+    epochs: int = 120                  # Aumentado de 60 → 120 para mejor convergencia
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     grad_clip: float = 1.0             # Clip de gradientes para estabilidad con MHN
 
-    # Scheduler: ReduceLROnPlateau
-    lr_patience: int = 7
-    lr_factor: float = 0.5
+    # Cosine LR con warmup (reemplaza ReduceLROnPlateau)
+    # Inspirado en MZA-PCG v5: evita colapso prematuro del LR en época 12.
+    warmup_epochs: int = 5             # LR crece linealmente de 0 → LR base
+    lr_min_factor: float = 0.01       # LR final = learning_rate * lr_min_factor
+
+    # CB-Focal Loss (Cui et al. 2019 + Lin et al. 2017)
+    focal_gamma: float = 2.0           # γ: exponent de penalización focal
+    focal_beta: float = 0.9999         # β: smoothing de volumen efectivo
+
+    # ClinicalMixUp — regularización en entrenamiento
+    # Mezcla espectrogramas + features tabulares de dos muestras del batch.
+    # Solo mezcla en un 50% de los batches para no degradar señales sutiles.
+    mixup_alpha: float = 0.3           # α para distribución Beta(α,α); 0.0 = desactivado
 
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
@@ -140,6 +164,7 @@ class Config:
     cnn: CNNConfig = field(default_factory=CNNConfig)
     hopfield: HopfieldConfig = field(default_factory=HopfieldConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    tabular: TabularConfig = field(default_factory=TabularConfig)
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
 

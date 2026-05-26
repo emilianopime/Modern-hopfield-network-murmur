@@ -27,6 +27,9 @@ build/
 *.log
 /tmp/
 
+# Carpeta del amigo (dataset + notebook, demasiado grande)
+murmur/
+
 # Archivos de descarga
 download_dataset.py
 

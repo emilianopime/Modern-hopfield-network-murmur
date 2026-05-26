@@ -39,10 +39,16 @@ def cmd_train(args) -> None:
     logger.info(f"Dispositivo: {cfg.training.device}")
     logger.info(f"Backbone CNN: {cfg.cnn.backbone} | Embedding dim: {cfg.cnn.embedding_dim}")
     logger.info(f"HopfieldPooling: β={'auto (1/√d)' if cfg.hopfield.beta is None else cfg.hopfield.beta} | prototipos: {cfg.hopfield.quantity}")
+    logger.info(f"Épocas: {cfg.training.epochs} | Warmup: {cfg.training.warmup_epochs} | MixUp α={cfg.training.mixup_alpha}")
+    logger.info(f"CBFocalLoss: γ={cfg.training.focal_gamma} | β={cfg.training.focal_beta}")
+    logger.info(f"Fusión tabular: {'activada (7 features clínicas)' if cfg.tabular.enabled else 'desactivada'}")
 
-    train_loader, val_loader = build_dataloaders(
+    # build_dataloaders ahora devuelve (train_loader, val_loader, samples_per_class)
+    train_loader, val_loader, samples_per_class = build_dataloaders(
         cfg.data, cfg.preprocess, cfg.training
     )
+    logger.info(f"Conteos [Present, Absent, Unknown]: {samples_per_class}")
+
     model = MurmurClassifier.from_config(cfg)
     logger.info(f"Parámetros totales: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -53,6 +59,7 @@ def cmd_train(args) -> None:
         train_cfg=cfg.training,
         classifier_cfg=cfg.classifier,
         cnn_cfg=cfg.cnn,
+        samples_per_class=samples_per_class,
     )
     trainer.train()
 
@@ -69,7 +76,7 @@ def cmd_eval(args) -> None:
         logger.error(f"Checkpoint no encontrado: {checkpoint_path}")
         sys.exit(1)
 
-    _, val_loader = build_dataloaders(cfg.data, cfg.preprocess, cfg.training)
+    _, val_loader, _ = build_dataloaders(cfg.data, cfg.preprocess, cfg.training)
     model = MurmurClassifier.from_config(cfg)
 
     checkpoint = torch.load(checkpoint_path, map_location=cfg.training.device, weights_only=False)
@@ -79,9 +86,10 @@ def cmd_eval(args) -> None:
 
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for spectrograms, labels in val_loader:
+        for spectrograms, tabulars, labels in val_loader:
             spectrograms = spectrograms.to(cfg.training.device)
-            preds = model.predict(spectrograms)
+            tabulars     = tabulars.to(cfg.training.device)
+            preds = model.predict(spectrograms, tabulars)
             all_preds.append(preds.cpu())
             all_labels.append(labels)
 
