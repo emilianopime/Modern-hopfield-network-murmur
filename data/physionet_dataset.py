@@ -1,11 +1,3 @@
-"""
-data/physionet_dataset.py — Dataset PhysioNet Challenge 2022 (CirCor DigiScope)
-
-v3: añade WeightedRandomSampler para oversampling de clases minoritarias.
-    Unknown × 10, Present × 5, Absent × 1 → el modelo ve Unknown casi
-    tan seguido como Absent, atacando el colapso de Unknown directamente.
-"""
-
 import logging
 from pathlib import Path
 
@@ -18,27 +10,15 @@ from data.preprocessing import PCGPreprocessor
 
 logger = logging.getLogger(__name__)
 
-LABEL_MAP  = {"Present": 0, "Absent": 1, "Unknown": 2}
-AGE_ORDER  = ["Neonate", "Infant", "Child", "Adolescent", "Young Adult"]
-AGE_MAP    = {age: i for i, age in enumerate(AGE_ORDER)}
-TABULAR_N_FEATURES = 7
+LABEL_MAP = {"Present": 0, "Absent": 1, "Unknown": 2}
+AGE_ORDER = ["Neonate", "Infant", "Child", "Adolescent", "Young Adult"]
+AGE_MAP   = {age: i for i, age in enumerate(AGE_ORDER)}
 
-
-# ─────────────────────────────────────────────
-# Extracción de features tabulares
-# ─────────────────────────────────────────────
 
 def _parse_tabular(row: pd.Series) -> torch.Tensor:
-    """
-    Extrae 7 features clínicos de una fila del CSV.
-    [age_group, sex, height, weight, bmi, recording_count, pregnancy]
-    Fuente feature engineering: PF5367600.py (FeatureEngineer del amigo).
-    """
-    age_str   = str(row.get("Age", "Child")).strip()
-    age_group = AGE_MAP.get(age_str, 2) / 4.0
-
-    sex_str = str(row.get("Sex", "Unknown")).strip()
-    sex = 1.0 if sex_str == "Male" else 0.0
+    """Extrae 7 features clínicos normalizados: [age_group, sex, height, weight, bmi, recording_count, pregnancy]."""
+    age_group = AGE_MAP.get(str(row.get("Age", "Child")).strip(), 2) / 4.0
+    sex       = 1.0 if str(row.get("Sex", "")).strip() == "Male" else 0.0
 
     try:
         height      = float(row.get("Height", 0))
@@ -53,18 +33,15 @@ def _parse_tabular(row: pd.Series) -> torch.Tensor:
         weight_norm = 0.3
 
     try:
-        h_m = float(row.get("Height", 0)) / 100.0
-        w_kg = float(row.get("Weight", 0))
+        h_m      = float(row.get("Height", 0)) / 100.0
+        w_kg     = float(row.get("Weight", 0))
         bmi_norm = max(0.0, (w_kg / (h_m ** 2) - 10.0) / 30.0) if h_m > 0.3 else 0.4
     except (ValueError, TypeError, ZeroDivisionError):
         bmi_norm = 0.4
 
-    locs_str = str(row.get("Recording locations:", "")).strip()
-    n_locs   = len([l for l in locs_str.split("+") if l.strip()]) if locs_str else 0
-    recording_count_norm = n_locs / 4.0
-
-    preg_str   = str(row.get("Pregnancy status", "False")).strip().lower()
-    pregnancy  = 1.0 if preg_str in ("true", "1", "yes") else 0.0
+    locs_str             = str(row.get("Recording locations:", "")).strip()
+    recording_count_norm = len([l for l in locs_str.split("+") if l.strip()]) / 4.0 if locs_str else 0.0
+    pregnancy            = 1.0 if str(row.get("Pregnancy status", "False")).strip().lower() in ("true", "1", "yes") else 0.0
 
     return torch.tensor(
         [age_group, sex, height_norm, weight_norm, bmi_norm, recording_count_norm, pregnancy],
@@ -72,15 +49,8 @@ def _parse_tabular(row: pd.Series) -> torch.Tensor:
     )
 
 
-# ─────────────────────────────────────────────
-# Dataset
-# ─────────────────────────────────────────────
-
 class PhysioNetDataset(Dataset):
-    """
-    Dataset de fonocardiogramas del PhysioNet Challenge 2022.
-    Devuelve: (spectrogram, tabular, label)
-    """
+    """Dataset de fonocardiogramas del PhysioNet Challenge 2022. Devuelve (spectrogram, tabular, label)."""
 
     def __init__(
         self,
@@ -129,9 +99,8 @@ class PhysioNetDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, int]:
-        sample      = self.samples[idx]
-        spectrogram = self.preprocessor(sample["wav_path"])
-        return spectrogram, sample["tabular"], sample["label"]
+        sample = self.samples[idx]
+        return self.preprocessor(sample["wav_path"]), sample["tabular"], sample["label"]
 
     def get_patient_ids(self) -> list[str]:
         return list({s["patient_id"] for s in self.samples})
@@ -143,10 +112,6 @@ class PhysioNetDataset(Dataset):
             counts[s["label"]] += 1
         return counts
 
-
-# ─────────────────────────────────────────────
-# Collate con padding dinámico
-# ─────────────────────────────────────────────
 
 def collate_fn_pad(
     batch: list[tuple[torch.Tensor, torch.Tensor, int]]
@@ -163,37 +128,10 @@ def collate_fn_pad(
     )
 
 
-# ─────────────────────────────────────────────
-# WeightedRandomSampler — v3
-# ─────────────────────────────────────────────
-
-def build_weighted_sampler(
-    dataset: PhysioNetDataset,
-    class_sample_weights: list[float],
-) -> WeightedRandomSampler:
-    """
-    Crea un WeightedRandomSampler que oversamples clases minoritarias.
-
-    class_sample_weights = [w_Present, w_Absent, w_Unknown]
-    Valores recomendados: [5.0, 1.0, 10.0]
-      → Unknown aparece 10× más que Absent por unidad de muestreo
-      → Present aparece 5× más que Absent por unidad de muestreo
-
-    Usa replacement=True (oversampling con reemplazo) — el número total
-    de muestras por época sigue siendo len(dataset) pero con distribución
-    re-balanceada entre clases.
-    """
+def build_weighted_sampler(dataset: PhysioNetDataset, class_sample_weights: list[float]) -> WeightedRandomSampler:
     weights = [float(class_sample_weights[s["label"]]) for s in dataset.samples]
-    return WeightedRandomSampler(
-        weights=weights,
-        num_samples=len(weights),
-        replacement=True,
-    )
+    return WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
 
-
-# ─────────────────────────────────────────────
-# Builder de DataLoaders
-# ─────────────────────────────────────────────
 
 def build_dataloaders(
     data_cfg: DataConfig,
@@ -203,11 +141,7 @@ def build_dataloaders(
     """
     Construye los DataLoaders de entrenamiento y validación.
     División por paciente para evitar data leakage.
-
-    Returns:
-        train_loader, val_loader, samples_per_class
-        donde samples_per_class = [n_Present, n_Absent, n_Unknown] reales
-        del split de entrenamiento (para CBFocalLoss).
+    Retorna (train_loader, val_loader, samples_per_class).
     """
     preprocessor = PCGPreprocessor(preprocess_cfg)
     csv_path     = data_cfg.dataset_path / "training_data.csv"
@@ -217,15 +151,13 @@ def build_dataloaders(
     rng      = torch.Generator().manual_seed(data_cfg.random_seed)
     n_val    = int(len(all_ids) * data_cfg.val_split)
     shuffled = torch.randperm(len(all_ids), generator=rng).tolist()
-    val_ids  = set(all_ids[i] for i in shuffled[:n_val])
+    val_ids   = set(all_ids[i] for i in shuffled[:n_val])
     train_ids = set(all_ids[i] for i in shuffled[n_val:])
 
     train_ds = PhysioNetDataset(csv_path, wav_dir, preprocessor,
-                                positions=data_cfg.auscultation_positions,
-                                split_ids=train_ids)
+                                positions=data_cfg.auscultation_positions, split_ids=train_ids)
     val_ds   = PhysioNetDataset(csv_path, wav_dir, preprocessor,
-                                positions=data_cfg.auscultation_positions,
-                                split_ids=val_ids)
+                                positions=data_cfg.auscultation_positions, split_ids=val_ids)
 
     samples_per_class = train_ds.get_class_counts()
     logger.info(
@@ -233,39 +165,24 @@ def build_dataloaders(
         f"Conteos [Present, Absent, Unknown]: {samples_per_class}"
     )
 
-    # v3: WeightedRandomSampler — oversampling Unknown×10, Present×5
     if data_cfg.use_weighted_sampler:
-        sampler  = build_weighted_sampler(train_ds, data_cfg.sampler_weights)
-        shuffle  = False     # sampler y shuffle son mutuamente excluyentes
-        logger.info(
-            f"WeightedRandomSampler activo — "
-            f"pesos [Present, Absent, Unknown]: {data_cfg.sampler_weights}"
-        )
+        sampler = build_weighted_sampler(train_ds, data_cfg.sampler_weights)
+        shuffle = False
+        logger.info(f"WeightedRandomSampler activo — pesos [Present, Absent, Unknown]: {data_cfg.sampler_weights}")
     else:
         sampler = None
         shuffle = True
 
-    train_loader = DataLoader(
-        train_ds,
+    loader_kwargs = dict(
         batch_size=train_cfg.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        num_workers=train_cfg.num_workers,
-        pin_memory=train_cfg.pin_memory,
-        collate_fn=collate_fn_pad,
-        drop_last=True,
-        persistent_workers=train_cfg.num_workers > 0,
-        multiprocessing_context="fork" if train_cfg.num_workers > 0 else None,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=train_cfg.batch_size,
-        shuffle=False,
         num_workers=train_cfg.num_workers,
         pin_memory=train_cfg.pin_memory,
         collate_fn=collate_fn_pad,
         persistent_workers=train_cfg.num_workers > 0,
         multiprocessing_context="fork" if train_cfg.num_workers > 0 else None,
     )
+
+    train_loader = DataLoader(train_ds, shuffle=shuffle, sampler=sampler, drop_last=True, **loader_kwargs)
+    val_loader   = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     return train_loader, val_loader, samples_per_class

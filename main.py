@@ -1,18 +1,3 @@
-"""
-main.py — Punto de entrada principal del proyecto
-
-Modos de ejecución:
-    python main.py train        → Entrenamiento completo (todas las fases)
-    python main.py eval         → Evaluación de un checkpoint guardado
-    python main.py preprocess   → Pre-calcular y cachear espectrogramas (Fase 1)
-    python main.py explain      → Generar visualización de interpretabilidad
-
-Ejemplo de uso rápido:
-    python main.py train
-    python main.py eval --checkpoint checkpoints/checkpoint_best.pt
-    python main.py explain --wav data/physionet_2022/12345_AV.wav
-"""
-
 import argparse
 import logging
 import sys
@@ -20,7 +5,6 @@ from pathlib import Path
 
 import torch
 
-# ── Configuración de logging ────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -30,7 +14,6 @@ logger = logging.getLogger("main")
 
 
 def cmd_train(args) -> None:
-    """Fase completa de entrenamiento."""
     from config import cfg
     from data import build_dataloaders
     from models import MurmurClassifier
@@ -43,10 +26,7 @@ def cmd_train(args) -> None:
     logger.info(f"CBFocalLoss: γ={cfg.training.focal_gamma} | β={cfg.training.focal_beta}")
     logger.info(f"Fusión tabular: {'activada (7 features clínicas)' if cfg.tabular.enabled else 'desactivada'}")
 
-    # build_dataloaders ahora devuelve (train_loader, val_loader, samples_per_class)
-    train_loader, val_loader, samples_per_class = build_dataloaders(
-        cfg.data, cfg.preprocess, cfg.training
-    )
+    train_loader, val_loader, samples_per_class = build_dataloaders(cfg.data, cfg.preprocess, cfg.training)
     logger.info(f"Conteos [Present, Absent, Unknown]: {samples_per_class}")
 
     model = MurmurClassifier.from_config(cfg)
@@ -65,7 +45,6 @@ def cmd_train(args) -> None:
 
 
 def cmd_eval(args) -> None:
-    """Evaluación de un checkpoint sobre el conjunto de validación."""
     from config import cfg
     from data import build_dataloaders
     from models import MurmurClassifier
@@ -89,41 +68,34 @@ def cmd_eval(args) -> None:
         for spectrograms, tabulars, labels in val_loader:
             spectrograms = spectrograms.to(cfg.training.device)
             tabulars     = tabulars.to(cfg.training.device)
-            preds = model.predict(spectrograms, tabulars)
+            preds        = model.predict(spectrograms, tabulars)
             all_preds.append(preds.cpu())
             all_labels.append(labels)
 
-    all_preds = torch.cat(all_preds)
-    all_labels = torch.cat(all_labels)
-    metrics = compute_challenge_score(all_labels, all_preds)
-
+    metrics = compute_challenge_score(torch.cat(all_labels), torch.cat(all_preds))
     logger.info(f"Resultados de evaluación ({checkpoint_path.name}):")
     logger.info(format_metrics(metrics))
 
 
 def cmd_preprocess(args) -> None:
-    """Pre-calcula y cachea todos los espectrogramas de Mel (Fase 1)."""
     from config import cfg
     from data.preprocessing import PCGPreprocessor
 
     preprocessor = PCGPreprocessor(cfg.preprocess)
-    wav_dir = cfg.data.dataset_path
-    wav_files = list(wav_dir.glob("*.wav"))
+    wav_files    = list(cfg.data.dataset_path.glob("*.wav"))
 
     if not wav_files:
-        logger.warning(f"No se encontraron archivos .wav en {wav_dir}")
+        logger.warning(f"No se encontraron archivos .wav en {cfg.data.dataset_path}")
         return
 
     logger.info(f"Pre-procesando {len(wav_files)} archivos .wav → caché en {cfg.preprocess.cache_dir}")
     from tqdm import tqdm
     for wav in tqdm(wav_files, desc="Fase 1: Wavelet → S-G → Mel"):
         preprocessor(wav)
-
     logger.info("Preprocesamiento completado.")
 
 
 def cmd_explain(args) -> None:
-    """Genera visualización de interpretabilidad para un archivo .wav."""
     from config import cfg
     from data.preprocessing import PCGPreprocessor
     from models import MurmurClassifier
@@ -135,7 +107,7 @@ def cmd_explain(args) -> None:
         sys.exit(1)
 
     preprocessor = PCGPreprocessor(cfg.preprocess)
-    spectrogram = preprocessor(wav_path).unsqueeze(0)  # (1, 1, n_mels, T)
+    spectrogram  = preprocessor(wav_path).unsqueeze(0)
 
     model = MurmurClassifier.from_config(cfg)
     if args.checkpoint:
@@ -146,16 +118,15 @@ def cmd_explain(args) -> None:
     with torch.no_grad():
         logits, attn_weights = model(spectrogram, return_attention=True)
 
-    probs = torch.softmax(logits, dim=-1).squeeze()
-    class_names = cfg.classifier.class_names
-    pred_class = class_names[probs.argmax().item()]
+    probs      = torch.softmax(logits, dim=-1).squeeze()
+    pred_class = cfg.classifier.class_names[probs.argmax().item()]
 
     logger.info(f"Predicción: {pred_class}")
-    for name, prob in zip(class_names, probs.tolist()):
+    for name, prob in zip(cfg.classifier.class_names, probs.tolist()):
         logger.info(f"  {name}: {prob:.3f}")
 
     output_path = Path(f"explain_{wav_path.stem}.png")
-    fig = plot_attention_heatmap(
+    plot_attention_heatmap(
         wav_path=wav_path,
         attention_weights=attn_weights,
         spectrogram=spectrogram.squeeze(0),
@@ -172,32 +143,19 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Subcomando: train
-    subparsers.add_parser("train", help="Entrenar el modelo completo (Fases 2-3-4)")
+    subparsers.add_parser("train", help="Entrenar el modelo completo")
 
-    # Subcomando: eval
     eval_parser = subparsers.add_parser("eval", help="Evaluar un checkpoint guardado")
     eval_parser.add_argument("--checkpoint", required=True, help="Ruta al archivo .pt")
 
-    # Subcomando: preprocess
-    subparsers.add_parser("preprocess", help="Pre-calcular espectrogramas de Mel (Fase 1)")
+    subparsers.add_parser("preprocess", help="Pre-calcular espectrogramas de Mel")
 
-    # Subcomando: explain
-    explain_parser = subparsers.add_parser(
-        "explain", help="Visualizar interpretabilidad de atención Hopfield"
-    )
-    explain_parser.add_argument("--wav", required=True, help="Ruta al archivo .wav")
-    explain_parser.add_argument("--checkpoint", default=None, help="Ruta al checkpoint (opcional)")
+    explain_parser = subparsers.add_parser("explain", help="Visualizar interpretabilidad Hopfield")
+    explain_parser.add_argument("--wav",        required=True,  help="Ruta al archivo .wav")
+    explain_parser.add_argument("--checkpoint", default=None,   help="Ruta al checkpoint (opcional)")
 
     args = parser.parse_args()
-
-    commands = {
-        "train": cmd_train,
-        "eval": cmd_eval,
-        "preprocess": cmd_preprocess,
-        "explain": cmd_explain,
-    }
-    commands[args.command](args)
+    {"train": cmd_train, "eval": cmd_eval, "preprocess": cmd_preprocess, "explain": cmd_explain}[args.command](args)
 
 
 if __name__ == "__main__":
