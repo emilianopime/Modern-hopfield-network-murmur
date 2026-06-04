@@ -48,6 +48,13 @@ python main.py eval --checkpoint checkpoints/checkpoint_best.pt
 
 # Visualizar interpretabilidad (pesos de atención Hopfield sobre el audio)
 python main.py explain --wav data/physionet_2022/12345_AV.wav --checkpoint checkpoints/checkpoint_best.pt
+
+# Matriz de confusión (nivel paciente, con métricas)
+python plot_confusion_matrix.py
+python plot_confusion_matrix.py --checkpoint checkpoints/checkpoint_best.pt --output confusion_matrix.png
+python plot_confusion_matrix.py --no-normalize   # conteos absolutos en vez de porcentajes
+python plot_confusion_matrix.py --cpu            # forzar CPU
+python plot_confusion_matrix.py --show           # abrir ventana interactiva (requiere display X11)
 ```
 
 ## Module Map
