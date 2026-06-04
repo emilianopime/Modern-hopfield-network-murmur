@@ -1,29 +1,38 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## claude response
 responde en espanol para cualquier prompt que te haga.
+
 ## Project Goal
 
-Automatic cardiac murmur classification using Modern Hopfield Networks (MHN) applied to the **George B. Moody PhysioNet Challenge 2022** (CirCor DigiScope dataset). The task is a 3-class patient-level classification: **Present / Absent / Unknown**, using multi-focal phonocardiogram (PCG) recordings (`.wav` files from aortic, pulmonary, tricuspid, and mitral positions).
+Automatic cardiac murmur classification using Modern Hopfield Networks (MHN) applied to the **George B. Moody PhysioNet Challenge 2022** (CirCor DigiScope dataset). 3-class patient-level classification: **Present / Absent / Unknown**, using multi-focal phonocardiogram (PCG) recordings (`.wav` files from aortic, pulmonary, tricuspid, and mitral positions).
+
+Challenge scoring weights: Present=5, Absent=1, Unknown=3. The model optimizes Weighted Accuracy, not standard accuracy.
 
 ## Environment Setup
 
 > **CachyOS CUDA isolation protocol**: Do NOT install the CUDA toolkit system-wide. Use PyTorch's bundled CUDA 12.1 binaries to avoid library conflicts with the OS.
 
 ```bash
-# Create and activate virtualenv (project uses .venv/)
 python -m venv .venv
 source .venv/bin/activate
-
-# Install PyTorch with embedded CUDA 12.1 binaries
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Install MHN layer library and audio processing
 pip install hopfield-layers librosa
 ```
 
-The existing `.venv/` uses Python 3.14 (`/usr/bin/python3.14`).
+The existing `.venv/` uses Python 3.14 (`/usr/bin/python3.14`). `hopfield-layers` is optional — if missing, `HopfieldPoolingLayer` automatically falls back to `nn.MultiheadAttention` with learned queries.
+
+## Dataset Layout
+
+```
+data/physionet_2022/
+├── training_data.csv       ← requiere columnas: Patient ID, Murmur, Age, Sex, Height, Weight, ...
+├── 12345_AV.wav
+├── 12345_PV.wav
+└── ...                     ← nombre de archivo: {PatientID}_{Position}.wav
+```
 
 ## Commands
 
@@ -41,76 +50,64 @@ python main.py eval --checkpoint checkpoints/checkpoint_best.pt
 python main.py explain --wav data/physionet_2022/12345_AV.wav --checkpoint checkpoints/checkpoint_best.pt
 ```
 
-## Structure by Phase
+## Module Map
 
 ```
-data/preprocessing.py       ← Fase 1: wavelet denoising → Savitzky-Golay → Mel spectrogram
-models/cnn_frontend.py      ← Fase 2: CNN feature extractor (ResNet18/EfficientNet-B0)
-models/hopfield_pooling.py  ← Fase 3: HopfieldPooling (memoria asociativa continua)
-models/murmur_classifier.py ← Fase 4: modelo completo (integra fases 2-3-4)
-training/trainer.py         ← bucle de entrenamiento con freeze gradual del backbone
-training/metrics.py         ← weighted accuracy del PhysioNet Challenge
-utils/interpretability.py   ← extracción y visualización de pesos de atención
-config.py                   ← configuración centralizada (todos los hiperparámetros)
+config.py                   ← todos los hiperparámetros (único lugar para modificarlos)
+data/preprocessing.py       ← PCGPreprocessor: wavelet → Savitzky-Golay → Mel spectrogram + caché
+data/physionet_dataset.py   ← PhysioNetDataset, collate_fn_pad, WeightedRandomSampler, build_dataloaders
+models/cnn_frontend.py      ← CNNFrontend: ResNet18/EfficientNet-B0 modificado para PCG monocanal
+models/hopfield_pooling.py  ← HopfieldPoolingLayer: wrapper MHN con fallback a MHA
+models/murmur_classifier.py ← MurmurClassifier: integra CNN + Hopfield + TabularEncoder + clasificador
+training/trainer.py         ← Trainer: bucle completo con SpecAugment, ClinicalMixUp, SGDR
+training/metrics.py         ← CBFocalLoss, compute_challenge_score, format_metrics
+utils/interpretability.py   ← extract_hopfield_weights, plot_attention_heatmap
 ```
-
-Todos los hiperparámetros se modifican exclusivamente en `config.py` — ningún módulo tiene "magic numbers" propios.
 
 ## Architecture: 4-Stage Pipeline
 
-The full pipeline is defined in `Reporte_Tecnico_Hopfield_Moderno_PhysioNet.pdf` and implemented end-to-end:
-
 ```
-.wav audio → Mel Spectrogram → CNN Embeddings → HopfieldPooling → Linear Classifier
-```
-
-### Stage 1 — Preprocessing
-Convert raw `.wav` recordings to **Mel spectrograms** using `torchaudio`. This produces a 2D time-frequency matrix that captures harmonic content and subtle murmur transitions. Use `DataLoader(num_workers=6)` to saturate the 8-core Ryzen CPU during parallel spectrogram computation.
-
-### Stage 2 — Feature Extractor (CNN Frontend)
-A lightweight CNN (ResNet18 or EfficientNet-B0, modified) processes spectrogram blocks and outputs a **temporal sequence of dense embedding vectors**. This is the `Q` (query) fed into the Hopfield layer.
-
-### Stage 3 — Modern Hopfield Network (`HopfieldPooling`)
-The core of the architecture. Imported from `hopfield-layers`:
-
-```python
-from hflayers import HopfieldPooling
+.wav → (1, n_mels=128, T) → (B, T', 512) → (B, quantity*512) → [Present, Absent, Unknown]
+        Preprocessing        CNNFrontend     HopfieldPooling      MLP Classifier
+                                                    ↑
+                                        + (B, 64) TabularEncoder
+                                          (age, sex, height, weight, bmi, n_locs, pregnancy)
 ```
 
-The MHN update rule is mathematically equivalent to Softmax attention:
-`M(Q, K, V) = softmax(β · Q · Kᵀ) · V`
+### Stage 1 — Preprocessing (`data/preprocessing.py`)
+`PCGPreprocessor.__call__(wav_path)` returns `(1, 128, T_frames)`. Pipeline: Daubechies-6 wavelet denoising → Savitzky-Golay smoothing → Mel spectrogram (4000 Hz, 20–1000 Hz, 128 bins) → Z-score normalization. Results are cached in `data/cache/` keyed by MD5 of file path + config params.
 
-where **`K` and `V` are learned stored patterns** (the associative memory, not dynamic tokens). This means the layer acts as a **fixed clinical pattern memory** — comparing the patient's embeddings against internalized prototypes of murmur vs. normal heartbeats.
+### Stage 2 — CNN Frontend (`models/cnn_frontend.py`)
+ResNet18 modified: (1) first conv adapted from 3→1 channel using averaged pretrained weights; (2) `avgpool` and `fc` removed; (3) `AdaptiveAvgPool2d((1, None))` collapses only the frequency axis, preserving the temporal axis. Output: `(B, T', 512)` where `T' = T/32`.
 
-**HopfieldPooling** collapses the temporal dimension by selectively extracting only frames that match a stored "murmur" pattern, discarding irrelevant audio (breathing, friction, ambient noise). This solves the **Multiple Instance Learning** problem: a murmur may appear in only a fraction-of-a-second of a multi-minute recording.
+### Stage 3 — Modern Hopfield Network (`models/hopfield_pooling.py`)
+`HopfieldPoolingLayer` wraps `hflayers.HopfieldPooling`. Key parameter `quantity=4` sets the number of learned prototype queries. β initialized as `1/√embedding_dim`. Output: `(B, quantity * output_size)`. Attention weights stored in `self.last_attention_weights` for interpretability.
 
-### Stage 4 — Classification Head
-A linear layer maps the pooled representation to 3-class probabilities. Loss: `CrossEntropyLoss`.
+### Stage 4 — Classification Head (`models/murmur_classifier.py`)
+`TabularEncoder` maps 7 clinical features → 64d embedding (BatchNorm1d → Linear → LayerNorm → GELU → Dropout → Linear → GELU). Concatenated with Hopfield output → `LayerNorm → Dropout → Linear → GELU → Dropout → Linear(3)`.
+
+## Critical Design Decisions
+
+**Patient-level train/val split** (`data/physionet_dataset.py:build_dataloaders`): split is done by patient ID before building datasets to prevent data leakage. Multiple recordings from the same patient (up to 4 positions) always land in the same split.
+
+**Variable-length recordings**: `collate_fn_pad` zero-pads spectrograms in each batch to the longest recording. No fixed truncation — the Hopfield layer handles arbitrary-length sequences.
+
+**Two-phase training** (`training/trainer.py:_maybe_unfreeze_backbone`):
+- Epochs 1–12: CNN frozen, only HopfieldPooling + Tabular + Classifier train. LR warms up linearly.
+- Epoch 13+: full fine-tuning. CNN added as a second param group at `lr × 0.1` (differential learning rate).
+
+**SGDR schedule**: after warmup, cosine annealing with warm restarts every T₀=20 epochs. Restarts at epochs ~26, 46, 66, 86, 106. Best checkpoint in v3 was epoch 117 (WA=0.7197).
+
+**WeightedRandomSampler**: Unknown×10, Present×5 oversampling addresses the extreme class imbalance (132 Unknown vs 2026 Absent samples). This raised Unknown recall from 0.208 to 0.500.
 
 ## Critical Hyperparameter: Beta (β)
 
-β controls the selectivity ("temperature") of the Hopfield memory retrieval:
-
-- **Initialize**: `β = 1 / √d` where `d` is the embedding dimension
-- **β too high** → model fixates on only the single most active frame (ignores context)
-- **β too low** → degenerates to simple average pooling (loses the associative memory advantage)
-
-Tune β dynamically during training; it is the most impactful hyperparameter in this architecture.
+β controls retrieval selectivity in HopfieldPooling. Initialized at `1/√d`. High β → fixates on single frame; low β → degenerates to average pooling. Tune carefully; it is the most impactful hyperparameter in this architecture.
 
 ## Hardware Targets
 
 | Resource | Spec | Usage |
 |---|---|---|
-| GPU | NVIDIA RTX 3060 12GB | `batch_size=32` or `64`; MHN stores correlation matrices in VRAM |
+| GPU | NVIDIA RTX 3060 12GB | `batch_size=32`; MHN correlation matrices in VRAM |
 | CPU | AMD Ryzen 7 5700x (8C/16T) | `DataLoader(num_workers=6)` for parallel spectrogram prep |
-| RAM | 32GB DDR4 | Pre-computed spectrograms cached in memory to avoid OOM |
-
-## Interpretability
-
-The attention weights from `HopfieldPooling` directly indicate **which milliseconds of audio activated the murmur memory**. Extract these weights during inference to overlay a visual alert on the original phonocardiogram — this is the clinical explainability feature (avoids black-box behavior).
-
-## Key Design Rationale
-
-- **Why MHN over Transformer?** Standard Transformers compute dynamic self-attention between all input tokens. The MHN layer uses **fixed learned patterns as keys/values**, acting as a clinical prototype memory rather than dynamic routing. This improves robustness to variable-length recordings.
-- **Why avoid Global Average Pooling?** A brief murmur diluted across minutes of normal audio would vanish under average pooling. HopfieldPooling is selective — it surfaces anomalies.
-- **Multi-focal inputs**: Each patient has recordings from multiple auscultation positions. The model must handle this; patient-level (not recording-level) labels are the target.
+| RAM | 32GB DDR4 | Pre-computed spectrograms cached to avoid OOM |
