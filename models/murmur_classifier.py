@@ -7,6 +7,8 @@ from config import CNNConfig, ClassifierConfig, HopfieldConfig, TabularConfig
 from models.cnn_frontend import CNNFrontend
 from models.hopfield_pooling import HopfieldPoolingLayer
 
+_STRIDE = CNNFrontend.TEMPORAL_STRIDE
+
 
 class TabularEncoder(nn.Module):
     """MLP que convierte 7 features clínicas en un embedding de 64d."""
@@ -78,10 +80,25 @@ class MurmurClassifier(nn.Module):
         self,
         x: torch.Tensor,
         tabular: Optional[torch.Tensor] = None,
+        lengths: Optional[torch.Tensor] = None,
         return_attention: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        embeddings = self.cnn(x)
-        pooled     = self.hopfield(embeddings)
+        embeddings = self.cnn(x)                           # (B, T', D)
+
+        # Máscara de padding: True en frames que son solo relleno de ceros.
+        # Necesario porque T' varía de 3 a 16 en este dataset — hasta 80% de padding
+        # en grabaciones cortas contaminaría la memoria asociativa del Hopfield.
+        padding_mask = None
+        if lengths is not None:
+            T_prime  = embeddings.shape[1]
+            t_actual = (lengths.float() / _STRIDE).ceil().long().clamp(1, T_prime)
+            padding_mask = (
+                torch.arange(T_prime, device=x.device).unsqueeze(0) >= t_actual.unsqueeze(1)
+            )
+            if not padding_mask.any():
+                padding_mask = None
+
+        pooled = self.hopfield(embeddings, padding_mask=padding_mask)
 
         if self.use_tabular:
             if tabular is None:
@@ -99,9 +116,14 @@ class MurmurClassifier(nn.Module):
 
         return logits
 
-    def predict(self, x: torch.Tensor, tabular: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def predict(
+        self,
+        x: torch.Tensor,
+        tabular: Optional[torch.Tensor] = None,
+        lengths: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         with torch.no_grad():
-            return torch.argmax(self.forward(x, tabular), dim=-1)
+            return torch.argmax(self.forward(x, tabular, lengths), dim=-1)
 
     @staticmethod
     def from_config(cfg) -> "MurmurClassifier":

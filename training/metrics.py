@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Optional
 
 import numpy as np
@@ -93,6 +94,45 @@ def compute_challenge_score(
         "per_class_recall":    per_class_recall,
         "per_class_precision": per_class_precision,
     }
+
+
+_MAX_ENTROPY = math.log(3)  # log(C) para C=3 clases — entropía máxima posible
+
+
+def aggregate_patient_preds(
+    patient_ids: list[str],
+    probs: torch.Tensor,
+    labels: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Agrega predicciones de múltiples grabaciones en una predicción por paciente.
+
+    Usa ponderación por confianza: las grabaciones donde el modelo es más certero
+    (baja entropía) contribuyen más que las grabaciones ambiguas.
+    weight_i = softmax( confidence_i ) donde confidence_i = 1 - H(p_i) / log(C).
+
+    Reduce N grabaciones a P pacientes únicos (P ≤ N).
+    """
+    patient_probs: dict[str, list] = {}
+    patient_label: dict[str, int]  = {}
+
+    for i, pid in enumerate(patient_ids):
+        if pid not in patient_probs:
+            patient_probs[pid] = []
+            patient_label[pid] = labels[i].item()
+        patient_probs[pid].append(probs[i])
+
+    agg_preds, agg_labels = [], []
+    for pid, prob_list in patient_probs.items():
+        stacked = torch.stack(prob_list)                                      # (N, C)
+        entropy    = -(stacked * (stacked + 1e-8).log()).sum(dim=1)           # (N,)
+        confidence = 1.0 - entropy / _MAX_ENTROPY                            # (N,) ∈ [0, 1]
+        weights    = torch.softmax(confidence * 3.0, dim=0).unsqueeze(1)     # temperatura 3
+        avg_prob   = (stacked * weights).sum(dim=0)                          # (C,)
+        agg_preds.append(avg_prob.argmax().item())
+        agg_labels.append(patient_label[pid])
+
+    return torch.tensor(agg_preds), torch.tensor(agg_labels)
 
 
 def format_metrics(metrics: dict) -> str:

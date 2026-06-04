@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import ClassifierConfig, TrainingConfig, CNNConfig
-from training.metrics import CBFocalLoss, compute_challenge_score, format_metrics
+from training.metrics import CBFocalLoss, compute_challenge_score, format_metrics, aggregate_patient_preds
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class Trainer:
         total_loss = 0.0
 
         pbar = tqdm(self.train_loader, desc=f"Train {epoch}", leave=False)
-        for spectrograms, tabulars, labels in pbar:
+        for spectrograms, tabulars, labels, _, _ in pbar:
             spectrograms = spectrograms.to(self.device, non_blocking=True)
             tabulars     = tabulars.to(self.device, non_blocking=True)
             labels       = labels.to(self.device, non_blocking=True)
@@ -176,16 +176,20 @@ class Trainer:
     @torch.no_grad()
     def _validate_epoch(self, epoch: int) -> dict:
         self.model.eval()
-        all_preds, all_labels = [], []
+        all_probs, all_labels, all_pids = [], [], []
 
-        for spectrograms, tabulars, labels in tqdm(self.val_loader, desc=f"Val   {epoch}", leave=False):
+        for spectrograms, tabulars, labels, patient_ids, lengths in tqdm(self.val_loader, desc=f"Val   {epoch}", leave=False):
             spectrograms = spectrograms.to(self.device, non_blocking=True)
             tabulars     = tabulars.to(self.device, non_blocking=True)
-            preds        = torch.argmax(self.model(spectrograms, tabulars), dim=-1)
-            all_preds.append(preds.cpu())
+            probs        = torch.softmax(self.model(spectrograms, tabulars, lengths.to(self.device)), dim=-1)
+            all_probs.append(probs.cpu())
             all_labels.append(labels)
+            all_pids.extend(patient_ids)
 
-        return compute_challenge_score(torch.cat(all_labels), torch.cat(all_preds))
+        preds, labels = aggregate_patient_preds(
+            all_pids, torch.cat(all_probs), torch.cat(all_labels)
+        )
+        return compute_challenge_score(labels, preds)
 
     def _update_lr(self, epoch: int) -> None:
         new_lr = sgdr_lr(epoch, self.cfg.learning_rate, self.cfg.warmup_epochs, self.cfg.sgdr_T0, self.cfg.lr_min_factor)

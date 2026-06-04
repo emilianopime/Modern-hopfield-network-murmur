@@ -10,13 +10,18 @@ from data.preprocessing import PCGPreprocessor
 
 logger = logging.getLogger(__name__)
 
-LABEL_MAP = {"Present": 0, "Absent": 1, "Unknown": 2}
-AGE_ORDER = ["Neonate", "Infant", "Child", "Adolescent", "Young Adult"]
-AGE_MAP   = {age: i for i, age in enumerate(AGE_ORDER)}
+LABEL_MAP    = {"Present": 0, "Absent": 1, "Unknown": 2}
+AGE_ORDER    = ["Neonate", "Infant", "Child", "Adolescent", "Young Adult"]
+AGE_MAP      = {age: i for i, age in enumerate(AGE_ORDER)}
+POSITION_MAP = {"AV": 0, "PV": 1, "TV": 2, "MV": 3}
 
 
-def _parse_tabular(row: pd.Series) -> torch.Tensor:
-    """Extrae 7 features clínicos normalizados: [age_group, sex, height, weight, bmi, recording_count, pregnancy]."""
+def _parse_tabular(row: pd.Series, position: str) -> torch.Tensor:
+    """
+    Extrae 11 features normalizados:
+    [age_group, sex, height, weight, bmi, recording_count, pregnancy] + one-hot posición (AV/PV/TV/MV).
+    La posición de auscultación es clínicamente relevante: AV/PV más diagnósticos para soplos.
+    """
     age_group = AGE_MAP.get(str(row.get("Age", "Child")).strip(), 2) / 4.0
     sex       = 1.0 if str(row.get("Sex", "")).strip() == "Male" else 0.0
 
@@ -43,8 +48,11 @@ def _parse_tabular(row: pd.Series) -> torch.Tensor:
     recording_count_norm = len([l for l in locs_str.split("+") if l.strip()]) / 4.0 if locs_str else 0.0
     pregnancy            = 1.0 if str(row.get("Pregnancy status", "False")).strip().lower() in ("true", "1", "yes") else 0.0
 
+    pos_onehot = [0.0] * 4
+    pos_onehot[POSITION_MAP.get(position, 0)] = 1.0
+
     return torch.tensor(
-        [age_group, sex, height_norm, weight_norm, bmi_norm, recording_count_norm, pregnancy],
+        [age_group, sex, height_norm, weight_norm, bmi_norm, recording_count_norm, pregnancy] + pos_onehot,
         dtype=torch.float32,
     )
 
@@ -79,8 +87,7 @@ class PhysioNetDataset(Dataset):
                 logger.warning(f"Paciente {patient_id}: etiqueta desconocida '{label_str}', omitido.")
                 continue
 
-            label   = LABEL_MAP[label_str]
-            tabular = _parse_tabular(row)
+            label = LABEL_MAP[label_str]
 
             for pos in self.positions:
                 wav_path = wav_dir / f"{patient_id}_{pos}.wav"
@@ -90,7 +97,7 @@ class PhysioNetDataset(Dataset):
                         "position":   pos,
                         "wav_path":   wav_path,
                         "label":      label,
-                        "tabular":    tabular,
+                        "tabular":    _parse_tabular(row, pos),
                     })
 
         logger.info(f"Dataset cargado: {len(self.samples)} grabaciones.")
@@ -98,9 +105,9 @@ class PhysioNetDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, int, str]:
         sample = self.samples[idx]
-        return self.preprocessor(sample["wav_path"]), sample["tabular"], sample["label"]
+        return self.preprocessor(sample["wav_path"]), sample["tabular"], sample["label"], sample["patient_id"]
 
     def get_patient_ids(self) -> list[str]:
         return list({s["patient_id"] for s in self.samples})
@@ -114,17 +121,20 @@ class PhysioNetDataset(Dataset):
 
 
 def collate_fn_pad(
-    batch: list[tuple[torch.Tensor, torch.Tensor, int]]
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    spectrograms, tabulars, labels = zip(*batch)
-    max_t  = max(s.shape[-1] for s in spectrograms)
-    padded = torch.zeros(len(spectrograms), *spectrograms[0].shape[:-1], max_t)
+    batch: list[tuple[torch.Tensor, torch.Tensor, int, str]]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
+    spectrograms, tabulars, labels, patient_ids = zip(*batch)
+    lengths = torch.tensor([s.shape[-1] for s in spectrograms], dtype=torch.long)
+    max_t   = lengths.max().item()
+    padded  = torch.zeros(len(spectrograms), *spectrograms[0].shape[:-1], max_t)
     for i, spec in enumerate(spectrograms):
         padded[i, ..., : spec.shape[-1]] = spec
     return (
         padded,
         torch.stack(tabulars),
         torch.tensor(labels, dtype=torch.long),
+        list(patient_ids),
+        lengths,
     )
 
 

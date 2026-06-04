@@ -59,7 +59,7 @@ class ClassifierConfig:
 @dataclass
 class TabularConfig:
     enabled: bool = True
-    n_features: int = 7
+    n_features: int = 11  # 7 clínicos + 4 one-hot posición auscultación (AV/PV/TV/MV)
     embed_dim: int = 64
     dropout: float = 0.2
 

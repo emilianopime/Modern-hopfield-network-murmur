@@ -9,8 +9,10 @@ class CNNFrontend(nn.Module):
     """
     Extrae embeddings temporales del espectrograma de Mel.
     Entrada:  (B, 1, n_mels, T_frames)
-    Salida:   (B, T', embedding_dim) donde T' = T/32
+    Salida:   (B, T', embedding_dim) donde T' ≈ T/32
     """
+
+    TEMPORAL_STRIDE = 32  # Downsampling temporal acumulado de ResNet18 (conv1×2 + maxpool×2 + layer2×2 + layer3×2 + layer4×2)
 
     def __init__(self, config: CNNConfig):
         super().__init__()

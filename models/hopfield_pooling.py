@@ -63,15 +63,21 @@ class HopfieldPoolingLayer(nn.Module):
 
         self.layer_norm = nn.LayerNorm(embedding_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Args:
+            x:            (B, T', embedding_dim)
+            padding_mask: (B, T') booleano — True en posiciones de padding a ignorar.
+        """
         if HOPFIELD_AVAILABLE:
-            out = self.pool(x)
+            out = self.pool(x, stored_pattern_padding_mask=padding_mask)
             self.last_attn_weights = self.pool.get_association_matrix(x).detach()
         else:
             B = x.shape[0]
             queries = self.learned_queries.unsqueeze(0).expand(B, -1, -1) * self.beta
             out, self.last_attn_weights = self.mha(
                 query=queries, key=x, value=x,
+                key_padding_mask=padding_mask,
                 need_weights=True, average_attn_weights=False,
             )
 

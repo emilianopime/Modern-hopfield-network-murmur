@@ -48,7 +48,7 @@ def cmd_eval(args) -> None:
     from config import cfg
     from data import build_dataloaders
     from models import MurmurClassifier
-    from training.metrics import compute_challenge_score, format_metrics
+    from training.metrics import compute_challenge_score, format_metrics, aggregate_patient_preds
 
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.exists():
@@ -63,16 +63,18 @@ def cmd_eval(args) -> None:
     model.to(cfg.training.device)
     model.eval()
 
-    all_preds, all_labels = [], []
+    all_probs, all_labels, all_pids = [], [], []
     with torch.no_grad():
-        for spectrograms, tabulars, labels in val_loader:
+        for spectrograms, tabulars, labels, patient_ids, lengths in val_loader:
             spectrograms = spectrograms.to(cfg.training.device)
             tabulars     = tabulars.to(cfg.training.device)
-            preds        = model.predict(spectrograms, tabulars)
-            all_preds.append(preds.cpu())
+            probs        = torch.softmax(model(spectrograms, tabulars, lengths.to(cfg.training.device)), dim=-1)
+            all_probs.append(probs.cpu())
             all_labels.append(labels)
+            all_pids.extend(patient_ids)
 
-    metrics = compute_challenge_score(torch.cat(all_labels), torch.cat(all_preds))
+    preds, labels = aggregate_patient_preds(all_pids, torch.cat(all_probs), torch.cat(all_labels))
+    metrics = compute_challenge_score(labels, preds)
     logger.info(f"Resultados de evaluación ({checkpoint_path.name}):")
     logger.info(format_metrics(metrics))
 
